@@ -2,6 +2,19 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
 let sequence = 0;
+let diagramEngine: Promise<typeof import('mermaid')['default']> | undefined;
+function getDiagramEngine() {
+  return diagramEngine ??= import('mermaid').then(({ default: mermaid }) => {
+    // v12 uses the global htmlLabels setting for node labels. SVG sanitization
+    // intentionally removes foreignObject, so all diagram labels must be SVG text.
+    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', suppressErrorRendering: true,
+      theme: 'neutral', look: 'classic', htmlLabels: false,
+      fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-body').trim(),
+      flowchart: { htmlLabels: false, wrappingWidth: 240, useMaxWidth: false },
+      sequence: { useMaxWidth: false }, class: { useMaxWidth: false }, state: { useMaxWidth: false } });
+    return mermaid;
+  }).catch(error => { diagramEngine = undefined; throw error; });
+}
 /** Markdown is user content: sanitize before insertion and never enable script URLs. */
 export async function renderMarkdown(target: HTMLElement, source: string, diagrams = true) {
   const version = String(++sequence);
@@ -18,20 +31,26 @@ export async function renderMarkdown(target: HTMLElement, source: string, diagra
   if (!diagrams) return;
   const blocks = [...target.querySelectorAll<HTMLElement>('pre > code.language-mermaid')];
   if (!blocks.length) return;
-  const { default: mermaid } = await import('mermaid');
-  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', suppressErrorRendering: true, theme: 'neutral',
-    fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-body'), flowchart: { htmlLabels: false } });
   for (const block of blocks) {
     if (target.dataset.renderVersion !== version) return;
     try {
+      const mermaid = await getDiagramEngine();
+      if (target.dataset.renderVersion !== version || !target.isConnected) return;
+      await document.fonts.ready;
       const { svg } = await mermaid.render('diagram-' + (++sequence), block.textContent || '');
       if (target.dataset.renderVersion !== version || !block.parentElement) return;
       const figure = document.createElement('figure'); figure.className = 'markdown-diagram';
       figure.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
-      block.parentElement.replaceWith(figure);
-    } catch {
+      figure.setAttribute('role', 'img'); figure.setAttribute('aria-label', '程序结构与调用关系图');
+      const source = document.createElement('details'), summary = document.createElement('summary');
+      summary.textContent = '查看 Mermaid 源码'; source.append(summary);
+      block.parentElement.replaceWith(figure, source); source.append(block.parentElement!);
+    } catch (error) {
+      if (target.dataset.renderVersion !== version || !block.isConnected) return;
       block.parentElement?.classList.add('diagram-error');
-      block.parentElement?.setAttribute('title', '图表语法未通过，保留原文');
+      const notice = document.createElement('p'); notice.className = 'diagram-error-message';
+      notice.textContent = '图表暂时无法显示，原文已保留：' + (error instanceof Error ? error.message : '请刷新后重试');
+      block.parentElement?.before(notice);
     }
   }
 }

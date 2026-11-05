@@ -1,5 +1,6 @@
 /* Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V3. Existing palette and component scope. */
 #screen-empty{color:var(--color-ink)}
+.markdown-diagram{padding:12px 0}.markdown .markdown-diagram svg{display:block;min-width:480px;max-width:none;width:auto;margin:auto}.diagram-error-message{color:var(--color-danger)}
 #studio{height:100dvh;display:flex;flex-direction:column;overflow:hidden;--preview-width:42%;--code-height:54%;--tree-width:180px;--log-height:140px}
 .toolbar,footer,#message{flex-shrink:0}.workspace{flex:1;min-height:0;grid-template-columns:minmax(300px,var(--preview-width)) 7px minmax(350px,1fr)}
 .preview-column{display:grid;grid-template-rows:44px minmax(260px,1fr) 7px var(--log-height);border:0;overflow:hidden}
