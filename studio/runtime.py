@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import deque
 import json
 import os
@@ -16,7 +17,7 @@ from .store import Problem
 
 
 class Runtime:
-    def __init__(self, store, image="xiangqi-runner:0.1.0"):
+    def __init__(self, store, image="xiangqi-runner:0.2.0"):
         self.store, self.image = store, image
         self.lsp = {}
         self.guard = threading.RLock()
@@ -84,6 +85,13 @@ class Runtime:
     def stop(self, user):
         self.docker("rm", "-f", self.name("gui", user["id"]), check=False)
 
+    def resize(self, user, width, height):
+        root = self.directories(user['id']) / 'sockets'
+        temporary = root / ('viewport-' + uuid.uuid4().hex)
+        temporary.write_text(f'{width} {height}')
+        temporary.replace(root / 'viewport')
+        return {'width': width, 'height': height}
+
     def status(self, user):
         name = self.name("gui", user["id"])
         result = self.docker("inspect", "--format", "{{json .State}}", name, check=False)
@@ -144,20 +152,51 @@ class Runtime:
             if uid in self.lsp:
                 raise Problem("这个账号已有一个语义补全会话，请关闭另一编辑页后重试", 409)
             self.lsp[uid] = None
-        root = self.directories(uid)
-        name = self.name("lsp", uid)
-        self.docker("rm", "-f", name, check=False)
-        args = ["docker", "run", "--rm", "-i", *self.flags(name, uid, "512m"),
-                "-v", str(self.store.project_dir(uid)) + ":/workspace:rw",
-                "-v", str(root / "language") + ":/language:rw", self.image, "python3", "/opt/runner/runner.py", "lsp"]
         try:
+            root = self.directories(uid)
+            name = self.name("lsp", uid)
+            self.docker("rm", "-f", name, check=False)
+            self.prepare_language(uid, root)
+            args = ["docker", "run", "--rm", "-i", *self.flags(name, uid, "512m"),
+                    "-v", str(self.store.project_dir(uid)) + ":/workspace:rw",
+                    "-v", str(root / "language") + ":/language:rw", self.image, "python3", "/opt/runner/runner.py", "lsp"]
             process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
                                                          stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
             self.lsp[uid] = process
             return process
-        except Exception:
+        except BaseException:
             self.lsp.pop(uid, None)
             raise
+
+    def prepare_language(self, uid, root):
+        """A changed Maven layout needs a fresh JDT resource model on next connect.
+
+        Only disposable indexes and untracked Eclipse-generated metadata are
+        removed. Course files, tracked Eclipse settings and Maven downloads remain.
+        """
+        project = self.store.project_dir(uid)
+        language = root / 'language'
+        signature = hashlib.sha256((project / 'pom.xml').read_bytes()).hexdigest()
+        marker = language / 'project-pom.sha256'
+        if marker.exists() and marker.read_text() == signature:
+            return
+        index = language / 'workspace'
+        if index.is_symlink() or index.resolve().parent != language.resolve():
+            raise Problem('索引目录无效', 409)
+        if index.exists():
+            shutil.rmtree(index)
+        managed = set(json.loads((project.parent / 'managed-files.json').read_text()))
+        for name in ('.classpath', '.project', '.settings'):
+            if any(path == name or path.startswith(name + '/') for path in managed):
+                continue
+            path = project / name
+            if path.is_symlink() or path.resolve().parent != project.resolve():
+                raise Problem('索引配置目录无效', 409)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+        marker.write_text(signature)
 
     async def close_language(self, uid, process):
         if self.lsp.get(uid) is process:

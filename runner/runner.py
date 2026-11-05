@@ -58,13 +58,18 @@ async def desktop():
     target = project()
     maven(target, "compile")
     env = {**os.environ, "DISPLAY": ":1", "XIANGQI_DATA_DIR": "/data"}
-    xvfb = subprocess.Popen(["Xvfb", ":1", "-screen", "0", "1000x760x24", "-nolisten", "tcp"])
+    # Capture a resizable portion of a large root display, so dialogs remain visible.
+    xvfb = subprocess.Popen(["Xvfb", ":1", "-screen", "0", "4096x3072x24", "-nolisten", "tcp"])
     for _ in range(50):
         if Path("/tmp/.X11-unix/X1").exists():
             break
         await asyncio.sleep(.1)
-    vnc = subprocess.Popen(["x11vnc", "-display", ":1", "-rfbport", "5900", "-localhost", "-forever", "-shared", "-nopw", "-quiet"], env=env)
-    java = subprocess.Popen(["java", "-Xmx128m", "-cp", str(target / "target/classes"), "edu.sustech.xiangqi.Main"], env=env)
+    viewport = Path('/sockets/viewport')
+    if not viewport.exists(): viewport.write_text('1000 760')
+    size = tuple(map(int, viewport.read_text().split()))
+    vnc = subprocess.Popen(["x11vnc", "-display", ":1", "-clip", f"{size[0]}x{size[1]}+0+0", "-rfbport", "5900", "-localhost", "-forever", "-shared", "-nopw", "-quiet"], env=env)
+    entry = "Main" if (target / "target/classes/Main.class").exists() else "edu.sustech.xiangqi.Main"
+    java = subprocess.Popen(["java", "-Xmx128m", "-cp", str(target / "target/classes") + ":/opt/runner", "StudioLauncher", entry], env=env)
     socket = Path("/sockets/vnc.sock")
     socket.unlink(missing_ok=True)
     server = await asyncio.start_unix_server(bridge, path=str(socket))
@@ -73,7 +78,12 @@ async def desktop():
     try:
         async with server:
             while java.poll() is None and xvfb.poll() is None and vnc.poll() is None:
-                await asyncio.sleep(1)
+                requested = tuple(map(int, viewport.read_text().split()))
+                if requested != size:
+                    size = requested
+                    subprocess.run(["x11vnc", "-display", ":1", "-R", f"clip:{size[0]}x{size[1]}+0+0"],
+                                   timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+                await asyncio.sleep(.3)
     finally:
         socket.unlink(missing_ok=True)
         for process in (java, vnc, xvfb):

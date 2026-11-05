@@ -22,8 +22,8 @@ if not args.backend_only:
     if args.build_proxy:
         build += ["--build-arg", "https_proxy=" + args.build_proxy, "--build-arg", "http_proxy=" + args.build_proxy,
                   "--build-arg", "no_proxy=mirrors.tencentyun.com,repo.maven.apache.org"]
-    run(*build, "-t", "xiangqi-runner:0.1.0", str(ROOT / "runner"))
-    run("docker", "image", "inspect", "--format", "{{.Id}} {{.Size}}", "xiangqi-runner:0.1.0")
+    run(*build, "-t", "xiangqi-runner:0.2.0", str(ROOT / "runner"))
+    run("docker", "image", "inspect", "--format", "{{.Id}} {{.Size}}", "xiangqi-runner:0.2.0")
 if args.image_only:
     raise SystemExit(0)
 if not (ROOT / ".venv").exists():

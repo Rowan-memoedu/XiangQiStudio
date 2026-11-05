@@ -56,24 +56,26 @@ def submit(c, title, expected="merged"):
     return finish(c, api(c, "submit", "POST", {"title": title})["id"], expected)
 
 a, b = client("test-a"), client("test-b")
+run_id=str(time.time_ns())
 initial_a, initial_b = api(a, "workspace"), api(b, "workspace")
-main_path = "src/main/java/edu/sustech/xiangqi/Main.java"
+main_path = "src/Main.java"
 original_main = a.get("file", params={"path": main_path}).json()["content"]
+other_chats = api(b,"chat")
 original_readme = a.get("file", params={"path": "README.md"}).json()["content"]
 with ThreadPoolExecutor(2) as pool:
-    list(pool.map(lambda pair: edit(*pair), [(a,"docs/acceptance-a.txt","测试甲的独立文件\n"), (b,"docs/acceptance-b.txt","测试乙的独立文件\n")]))
-assert b.get("file", params={"path": "docs/acceptance-a.txt"}).status_code == 404
-assert a.get("file", params={"path": "docs/acceptance-b.txt"}).status_code == 404
+    list(pool.map(lambda pair: edit(*pair), [(a,"docs/acceptance-"+run_id+"-a.txt","测试甲的独立文件\n"), (b,"docs/acceptance-"+run_id+"-b.txt","测试乙的独立文件\n")]))
+assert b.get("file", params={"path": "docs/acceptance-"+run_id+"-a.txt"}).status_code == 404
+assert a.get("file", params={"path": "docs/acceptance-"+run_id+"-b.txt"}).status_code == 404
 record("两测试账号异步草稿隔离")
 submit(a, "验收：测试甲独立文件")
 submit(b, "验收：测试乙无冲突合并")
 api(a,"pull","POST")
-assert a.get("file",params={"path":"docs/acceptance-b.txt"}).status_code == 200
+assert a.get("file",params={"path":"docs/acceptance-"+run_id+"-b.txt"}).status_code == 200
 record("真实隔离 CI 与最终合并结果 CI 通过后合并")
 
 api(b,"pull","POST")
-edit(a,"README.md",original_readme.replace("# 中国象棋课程项目", "# 中国象棋课程项目 · 测试甲",1))
-edit(b,"README.md",original_readme.replace("# 中国象棋课程项目", "# 中国象棋课程项目 · 测试乙",1))
+edit(a,"README.md",original_readme.replace("# 中国象棋", "# 中国象棋 · 测试甲",1))
+edit(b,"README.md",original_readme.replace("# 中国象棋", "# 中国象棋 · 测试乙",1))
 submit(a,"验收：同一行甲版本")
 shared=api(a,"workspace")["shared"]
 conflict=submit(b,"验收：同一行乙版本保留","conflict")
@@ -86,7 +88,7 @@ record("真实合并冲突保持共同版本不变，候选可下载",candidate=
 edit(a,"README.md",original_readme)
 submit(a,"验收：恢复测试区说明文档")
 api(b,"resolve-draft","POST")
-edit(a,main_path,original_main.replace("new Board();","new Board(;",1))
+edit(a,main_path,original_main.replace("new Game();","new Game(;",1))
 failed=submit(a,"验收：编译失败不得合并","failed")
 assert api(a,"workspace")["shared"] == api(b,"workspace")["shared"]
 edit(a,main_path,original_main)
@@ -96,18 +98,19 @@ download=a.get("download")
 download.raise_for_status()
 with zipfile.ZipFile(io.BytesIO(download.content)) as z:
     files={name:z.read(name) for name in z.namelist()}
+    version_comment=z.comment
 files["XiangQi/docs/acceptance-upload.txt"]="离线 ZIP 上传验收\n".encode()
-def zipped(files):
+def zipped(files, metadata=version_comment):
     stream=io.BytesIO()
     with zipfile.ZipFile(stream,"w",zipfile.ZIP_DEFLATED) as z:
         for name,data in files.items():z.writestr(name,data)
+        z.comment=metadata
     return stream.getvalue()
 uploaded=a.post("upload",files={"file":("course.zip",zipped(files),"application/zip")})
 uploaded.raise_for_status()
 finish(a,uploaded.json()["id"],"merged")
 record("ZIP 上传经过真实 CI 后无冲突合并")
-files.pop("XiangQi/.xiangqi-studio.json")
-uploaded=a.post("upload",files={"file":("without-base.zip",zipped(files),"application/zip")})
+uploaded=a.post("upload",files={"file":("without-base.zip",zipped(files,b""),"application/zip")})
 uploaded.raise_for_status()
 finish(a,uploaded.json()["id"],"needs-base")
 record("未知 ZIP 基线通过 CI 后仍保留候选，等待选择")
@@ -127,7 +130,7 @@ record("代码行批注与离线上线提醒、已读状态")
 answer=api(a,"chat","POST",{"question":"请用中文简要说明 Main、ChessController、Board 和 BoardPanel 在一次点击落子中的调用关系；指出真实的方法名，不超过 350 字。"})
 assert "Board" in answer["answer"] and "tryMove" in answer["answer"]
 (ROOT/"deepseek-answer.md").write_text(answer["answer"],encoding="utf-8")
-assert api(b,"chat") == []
+assert api(b,"chat") == other_chats
 record("DeepSeek 使用当前项目上下文回答，聊天记录按账号隔离")
 final=a.get("download");final.raise_for_status();(ROOT/"downloaded-project.zip").write_bytes(final.content)
 for c in (a,b):api(c,"stop","POST");api(c,"logout","POST");c.close()

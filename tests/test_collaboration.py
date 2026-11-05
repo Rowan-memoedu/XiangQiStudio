@@ -1,4 +1,5 @@
 import io
+import json
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 import pytest
@@ -119,7 +120,11 @@ def test_zip_roundtrip_known_base_and_missing_base_hold(team):
     store, users = team
     a = users["test-a"]
     edit(store, a, "a.txt", "zip edit\n")
-    known = store.import_zip(a, store.export(a))
+    exported = store.export(a)
+    with zipfile.ZipFile(io.BytesIO(exported)) as zipped:
+        assert set(zipped.namelist()) == {"XiangQi/" + path for path in INITIAL}
+        assert json.loads(zipped.comment)["base"] == store.workspace(a)["base"]
+    known = store.import_zip(a, exported)
     assert store.submission(a, known)["state"] == "queued"
     unknown = store.import_zip(a, archive(INITIAL))
     shared = store.repo("test").main()

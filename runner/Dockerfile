@@ -15,6 +15,8 @@ RUN mkdir -p /opt/jdtls /opt/m2 /opt/acceptance /opt/runner && \
     curl --fail --location --retry 3 https://repo.maven.apache.org/maven2/org/junit/platform/junit-platform-console-standalone/1.13.4/junit-platform-console-standalone-1.13.4.jar -o /opt/junit-console.jar
 COPY seed/ /opt/template/
 RUN cd /opt/template && mvn -B --no-transfer-progress -Dmaven.repo.local=/opt/m2 test && \
-    cp -a src/test/java/. /opt/acceptance/ && rm -rf target && chmod -R a+rX /opt
+    cp -a test/. /opt/acceptance/ && rm -rf target && chmod -R a+rX /opt
 COPY runner.py /opt/runner/runner.py
+COPY StudioLauncher.java /opt/runner/StudioLauncher.java
+RUN javac -d /opt/runner /opt/runner/StudioLauncher.java && chmod -R a+rX /opt/runner
 WORKDIR /tmp

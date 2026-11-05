@@ -67,4 +67,4 @@ class Workflow:
                     repo.call("update-ref", "refs/drafts/" + user["id"], merged)
             self.store.update_submission(sid, "merged", log + "\n最终合并结果 CI\n" + merged_log + "\n已合入共同版本 " + merged)
             return
-        self.store.update_submission(sid, "queued", log + "\n共同版本连续发生变化，候选保留，请重试提交。")
+        self.store.update_submission(sid, "failed", log + "\n共同版本连续发生变化，候选保留，请重试提交。")

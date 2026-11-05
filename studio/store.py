@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from contextlib import contextmanager
 
 
 MAX_FILE = 10 * 1024 * 1024
@@ -39,7 +40,7 @@ def safe_path(name: str) -> str:
     if any(ord(c) < 32 or c in '<>"|?*' for c in name) or any(
             part.endswith((" ", ".")) or part.split(".")[0].lower() in reserved for part in path.parts):
         raise Problem("路径不能用于 Windows / IDEA 项目")
-    blocked = {".git", ".idea", "node_modules", "target", "data", "saves", "users", "__MACOSX", ".mvn"}
+    blocked = {".git", ".idea", "node_modules", "target", "data", "saves", "users", "__macosx", ".mvn"}
     if any(part.lower() in blocked for part in path.parts):
         raise Problem("压缩包包含不允许导入的运行数据或配置：" + name)
     if any(part.lower().startswith((".env", "credentials", "secrets", "cookies", "tokens")) for part in path.parts):
@@ -145,10 +146,15 @@ class Store:
               CREATE TABLE IF NOT EXISTS chats(id INTEGER PRIMARY KEY, account TEXT, role TEXT, content TEXT, revision TEXT, created REAL);
             """)
 
+    @contextmanager
     def db(self):
         db = sqlite3.connect(self.root / "state.sqlite3", timeout=30)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def repo(self, team):
         if team not in ("main", "test"):
@@ -314,7 +320,8 @@ class Store:
         with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
             for path, data in files.items():
                 archive.writestr("XiangQi/" + path, data)
-            archive.writestr("XiangQi/" + MANIFEST, json.dumps({"format": 1, "base": ws["base"], "revision": revision}))
+            # ZIP transport metadata belongs in its comment, never in course source.
+            archive.comment = json.dumps({"format": 1, "base": ws["base"], "revision": revision}).encode()
         return stream.getvalue()
 
     def import_zip(self, user, data, chosen_base=None):
@@ -328,6 +335,11 @@ class Store:
                 names = [e.filename for e in entries]
                 prefix = names[0].split("/")[0] + "/" if "/" in names[0] and all(n.startswith(names[0].split("/")[0] + "/") for n in names) else ""
                 incoming, metadata, seen = {}, {}, set()
+                if archive.comment:
+                    try:
+                        metadata = json.loads(archive.comment)
+                    except (ValueError, UnicodeError):
+                        pass  # Ordinary ZIP comments do not establish a merge base.
                 for entry in entries:
                     name = entry.filename[len(prefix):]
                     if name.casefold() in seen:

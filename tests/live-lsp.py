@@ -16,7 +16,7 @@ def run(uid):
     client=httpx.Client(base_url=BASE,headers={"Origin":ORIGIN},timeout=20)
     login=client.post("login",json={"code":codes[uid]["invitation_code"]});login.raise_for_status()
     token=client.cookies.get("xq_session")
-    uri="file:///workspace/src/main/java/edu/sustech/xiangqi/Main.java"
+    uri="file:///workspace/src/Main.java"
     notifications=[]
     with connect("wss://124.221.144.155/xiangqi/ws/lsp",origin=ORIGIN,additional_headers={"Cookie":"xq_session="+token},open_timeout=30,max_size=8*1024*1024) as socket:
         def send(method,params,identifier=None):
@@ -49,7 +49,10 @@ def run(uid):
         if not any(m.get("method")=="language/status" and m["params"].get("type")=="Started" for m in notifications):
             receive("started")
         print(uid,"project indexed",flush=True)
-        text="package edu.sustech.xiangqi;\nimport edu.sustech.xiangqi.model.Board;\npublic class Main {\n  void sample() {\n    Board board = new Board();\n    board.\n  }\n}\n"
+        send("java/projectConfigurationUpdate", {"uri":"file:///workspace/pom.xml"})
+        send("java/buildWorkspace", [True], 2)
+        print(uid,"project refreshed",receive(2),flush=True)
+        text="\nimport model.game.Game;\npublic class Main {\n  void sample() {\n    Game board = new Game();\n    board.\n  }\n}\n"
         send("textDocument/didOpen",{"textDocument":{"uri":uri,"languageId":"java","version":1,"text":text}})
         labels=[]
         for attempt in range(8):
@@ -70,7 +73,7 @@ def run(uid):
         assert signature and signature["signatures"] and "int" in signature["signatures"][0]["label"],signature
         send("textDocument/definition",{"textDocument":{"uri":uri},"position":{"line":4,"character":6}},31)
         definition=receive(31)
-        assert "Board.java" in json.dumps(definition),definition
+        assert "Game.java" in json.dumps(definition),definition
         text=text.replace("board.tryMove(\n","board.thisMethodDoesNotExist();\n")
         send("textDocument/didChange",{"textDocument":{"uri":uri,"version":3},"contentChanges":[{"text":text}]})
         for attempt in range(8):
@@ -86,6 +89,8 @@ def run(uid):
     client.close()
     return result
 
-with ThreadPoolExecutor(2) as executor:
-    results=list(executor.map(run,["test-a","test-b"]))
+results=[]
+for uid in ["test-a","test-b"]:
+    results.append(run(uid))
+    time.sleep(3)  # Release the previous session before claiming the next one.
 Path("D:/Artifacts/XiangQiStudio/acceptance/lsp-results.json").write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding="utf-8")

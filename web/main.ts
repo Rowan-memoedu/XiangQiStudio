@@ -6,6 +6,9 @@ import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
 import RFB from '@novnc/novnc';
 import { JavaLanguage } from './lsp';
 import './style.css';
+import './workbench.css';
+import { renderMarkdown, projectLink } from './markdown';
+import { setupLayout } from './layout';
 
 (self as any).MonacoEnvironment={getWorker:()=>new EditorWorker()};
 const base=import.meta.env.BASE_URL;
@@ -14,6 +17,9 @@ type Buffer={model:monaco.editor.ITextModel;sha:string|null;saved:string;dirty:b
 const buffers=new Map<string,Buffer>();
 let csrf='',me:any,workspace:any,editor:monaco.editor.IStandaloneCodeEditor,language:JavaLanguage;
 let current='',suppress=false,rfb:any=null,runRequested=false,annotation:{path:string,line:number}|null=null;
+type Selection = {path:string; start_line:number; end_line:number};
+let selection:Selection|null=null, mdMode='preview', generating=false;
+let previewTimer:ReturnType<typeof setTimeout>, viewportTimer:ReturnType<typeof setTimeout>, lastViewport='';
 let lastVersions='',lastDiscussion='',polling=false,openSequence=0;
 
 class ApiError extends Error {status:number;data:any;constructor(status:number,data:any){super(data.error||data.detail?.[0]?.msg||'请求未完成');this.status=status;this.data=data;}}
@@ -58,7 +64,7 @@ async function openFile(path:string){
     buffer={model,sha:file.sha,saved:file.content,dirty:false,blocked:false,saving:null};
     buffers.set(path,buffer);
     const b=buffer;
-    model.onDidChangeContent(()=>{if(suppress)return;b.dirty=model.getValue()!==b.saved;remember(path,b);language?.change(model);clearTimeout(b.timer);b.timer=setTimeout(()=>saveBuffer(path,b).catch(e=>message(e.message,true)),900);changed();});
+    model.onDidChangeContent(()=>{if(suppress)return;b.dirty=model.getValue()!==b.saved;remember(path,b);language?.change(model);if(current===path&&path.endsWith('.md'))scheduleMarkdown();clearTimeout(b.timer);b.timer=setTimeout(()=>saveBuffer(path,b).catch(e=>message(e.message,true)),900);changed();});
     try{const cached=JSON.parse(localStorage.getItem(recoveryKey(path))||'null');
       if(cached && cached.content!==file.content){b.sha=cached.sha;b.model.setValue(cached.content);message('已恢复这台浏览器尚未同步的草稿，正在校验服务器版本。');}
     }catch{message('本机草稿缓存无法读取；服务器文件未改变。',true);}
@@ -67,7 +73,53 @@ async function openFile(path:string){
   if(sequence!==openSequence)return;
   current=path;editor.updateOptions({readOnly:false});editor.setModel(buffer.model);el('file-name').textContent=path;
   document.querySelectorAll<HTMLButtonElement>('#tree button').forEach(button=>button.classList.toggle('selected',button.dataset.path===path));
-  editor.focus();changed();
+  updateFileMode();if(!path.endsWith('.md')||mdMode!=='preview')editor.focus();changed();
+}
+
+function scheduleMarkdown(){clearTimeout(previewTimer);previewTimer=setTimeout(()=>updateMarkdown(),160);}
+async function updateMarkdown(){
+  const buffer=buffers.get(current);if(!buffer||!current.endsWith('.md'))return;
+  await renderMarkdown(el('markdown-preview'),buffer.model.getValue());
+}
+function updateFileMode(){
+  const markdown=current.endsWith('.md');el('md-modes').hidden=!markdown;
+  document.querySelector<HTMLElement>('.editor-content')!.dataset.mode=markdown?mdMode:'code';
+  for(const button of document.querySelectorAll<HTMLButtonElement>('[data-md-mode]'))button.setAttribute('aria-pressed',String(button.dataset.mdMode===mdMode));
+  if(markdown)void updateMarkdown();requestAnimationFrame(()=>editor.layout());
+}
+for(const button of document.querySelectorAll<HTMLButtonElement>('[data-md-mode]'))button.onclick=()=>{mdMode=button.dataset.mdMode!;updateFileMode();};
+el('markdown-preview').addEventListener('click',event=>{
+  const link=(event.target as HTMLElement).closest<HTMLAnchorElement>('a[href]');if(!link)return;
+  const href=link.getAttribute('href')!;
+  if(href.startsWith('#')){event.preventDefault();el('markdown-preview').querySelector('#'+CSS.escape(decodeURIComponent(href.slice(1))))?.scrollIntoView({block:'start'});return;}
+  const path=projectLink(current,href);if(path){event.preventDefault();openFile(path).catch(e=>message(e.message,true));}
+});
+function captureSelection(currentLine=false){
+  if(!current||!editor.getModel())throw new Error('请先打开代码并选择要解释的行');
+  const range=editor.getSelection()!,line=editor.getPosition()!.lineNumber;
+  const start=currentLine?line:range.startLineNumber;
+  const end=currentLine?line:Math.max(start,range.endLineNumber-(range.endColumn===1&&range.endLineNumber>start?1:0));
+  selection={path:current,start_line:start,end_line:end};
+  editor.setSelection(new monaco.Range(start,1,end,editor.getModel()!.getLineMaxColumn(end)));
+  annotation={path:current,line:start};
+  el('selection-context').hidden=false;el('selection-label').textContent=current+' · 第 '+start+(end===start?'':'–'+end)+' 行';
+  el('annotation').hidden=false;el('annotation').textContent='批注 '+current+':'+start;el('clear-annotation').hidden=false;
+}
+function clearSelection(){
+  selection=null;annotation=null;el('selection-context').hidden=true;el('annotation').hidden=true;el('clear-annotation').hidden=true;
+}
+function viewportSize(){
+  const bounds=document.querySelector('.screen-wrap')!.getBoundingClientRect();
+  const scale=Math.max(810/Math.max(1,bounds.width),650/Math.max(1,bounds.height),1);
+  return {width:Math.min(4096,Math.round(bounds.width*scale)),height:Math.min(3072,Math.round(bounds.height*scale))};
+}
+async function syncViewport(force=false){
+  if(!me||(!runRequested&&!force))return;
+  const size=viewportSize(),value=JSON.stringify(size);if(value===lastViewport&&!force)return;
+  await api('viewport','POST',size);lastViewport=value;
+}
+function layoutChanged(){
+  editor?.layout();clearTimeout(viewportTimer);viewportTimer=setTimeout(()=>syncViewport().catch(e=>message(e.message,true)),250);
 }
 
 function tree(files:any[]){
@@ -93,7 +145,55 @@ function tab(name:string){for(const id of ['chat','discussion','versions']){el('
 document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(button=>button.addEventListener('click',()=>tab(button.dataset.tab!)));
 
 function article(byline:string,body:string){const item=document.createElement('article');const who=document.createElement('div');who.className='byline';who.textContent=byline;const content=document.createElement('div');content.className='content';content.textContent=body;item.append(who,content);return item;}
-function renderChat(rows:any[]){el('chat-list').replaceChildren(...rows.map(row=>article(row.role==='user'?'你':'项目助手',row.content)));el('chat-list').scrollTop=el('chat-list').scrollHeight;}
+function renderChat(rows:any[]){
+  const items=rows.map(row=>{
+    const item=article(row.role==='user'?'你':'项目助手',row.role==='user'?row.content:'');
+    if(row.selection){const context=document.createElement('div');context.className='byline';context.textContent=row.selection.split('\n')[0];item.append(context);}
+    if(row.role==='assistant'){
+      const content=item.querySelector<HTMLElement>('.content')!;content.classList.add('markdown');void renderMarkdown(content,row.content);
+      if(row.finish_reason&&row.finish_reason!=='stop'){
+        const status=document.createElement('p');status.className='answer-status';status.textContent='这次回答尚未完整结束，已收到的全文已保留。';
+        const more=document.createElement('button');more.textContent='继续回答';more.onclick=()=>perform(more,()=>askQuestion('请继续上一条尚未完成的回答，从中断的位置接着讲。'));
+        item.append(status,more);
+      }
+    }
+    return item;
+  });
+  el('chat-list').replaceChildren(...items);
+  requestAnimationFrame(()=>{const lastQuestion=items.at(-2);if(lastQuestion)el('chat-list').scrollTop=lastQuestion.offsetTop-el('chat-list').offsetTop;});
+}
+async function askQuestion(question:string){
+  if(generating)throw new Error('上一条回答正在生成');
+  await saveAll();generating=true;tab('chat');
+  const questionItem=article('你',question),answerItem=article('项目助手','正在准备回答…');
+  if(selection)questionItem.append(article('选中代码',selection.path+' · 第 '+selection.start_line+'–'+selection.end_line+' 行'));
+  const content=answerItem.querySelector<HTMLElement>('.content')!;content.classList.add('markdown');
+  el('chat-list').append(questionItem,answerItem);questionItem.scrollIntoView({block:'nearest'});
+  let answer='',status='',paint=0;
+  try{
+    const response=await fetch(base+'api/chat/stream',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({question,selection})});
+    if(!response.ok){const error=await response.json();throw new Error(error.error||'问答请求未完成');}
+    const reader=response.body!.getReader(),decoder=new TextDecoder();let pending='';
+    const consume=(line:string)=>{
+      if(!line.trim())return;const event=JSON.parse(line);
+      if(event.type==='delta'){
+        answer+=event.text;
+        if(Date.now()-paint>120){paint=Date.now();void renderMarkdown(content,answer,false);}
+      }else if(event.type==='error')status=event.text;
+      else if(event.type==='status')answerItem.setAttribute('aria-label',event.text);
+      else if(event.type==='done'&&event.finish_reason!=='stop')status='回答尚未完整结束，已收到的内容会保留，可点击“继续回答”。';
+    };
+    while(true){const {done,value}=await reader.read();if(done)break;pending+=decoder.decode(value,{stream:true});const lines=pending.split('\n');pending=lines.pop()!;for(const line of lines)consume(line);}
+    pending+=decoder.decode();if(pending.trim())consume(pending);
+    if(answer){await renderMarkdown(content,answer);el<HTMLTextAreaElement>('question').value='';renderChat(await api('chat'));}
+    else throw new Error(status||'没有收到回答，请重试');
+    if(status)message(status,true);
+  }catch(error){
+    await renderMarkdown(content,answer||'');
+    const notice=document.createElement('p');notice.className='answer-status';notice.textContent=(error as Error).message;answerItem.append(notice);
+    throw error;
+  }finally{generating=false;}
+}
 
 function renderDiscussion(data:any){
   const unread=new Set(data.mentions.filter((m:any)=>!m.seen).map((m:any)=>m.comment));
@@ -148,7 +248,7 @@ async function poll(){
   finally{polling=false;}
 }
 
-async function start(){await saveAll();rfb?.disconnect();rfb=null;el('screen-empty').hidden=false;await api('run','POST');runRequested=true;el('run-status').textContent='正在编译…';await poll();}
+async function start(){await saveAll();rfb?.disconnect();rfb=null;el('screen-empty').hidden=false;await syncViewport(true);await api('run','POST');runRequested=true;el('run-status').textContent='正在编译…';await poll();}
 click('run',start);click('run-empty',start);
 click('fullscreen',async()=>{await document.querySelector<HTMLElement>('.screen-wrap')!.requestFullscreen();});
 click('toggle-tree',async()=>{const visible=document.querySelector('.code-area')!.classList.toggle('show-tree');el('toggle-tree').setAttribute('aria-expanded',String(visible));});
@@ -179,24 +279,29 @@ click('logout',async()=>{await saveAll();await api('stop','POST');language?.disp
 click('close-dialog',async()=>el<HTMLDialogElement>('version-dialog').close());
 async function reconnectLanguage(){language?.dispose();await new Promise(resolve=>setTimeout(resolve,600));language=new JavaLanguage(wsUrl('lsp'),text=>el('lsp-reconnect').textContent=text);}
 click('lsp-reconnect',reconnectLanguage);
-click('new-file',async()=>{const path=prompt('项目内文件路径，例如 src/main/java/edu/sustech/xiangqi/model/Example.java');if(!path)return;await api('file','PUT',{path,content:'',expected_sha:null});await refreshWorkspace();await openFile(path);});
-click('annotate',async()=>{if(!current)throw new Error('请先选择项目文件');annotation={path:current,line:editor.getPosition()?.lineNumber||1};el('annotation').hidden=false;el('annotation').textContent=`批注 ${annotation.path}:${annotation.line}`;el('clear-annotation').hidden=false;tab('discussion');el('comment').focus();});
-click('clear-annotation',async()=>{annotation=null;el('annotation').hidden=true;el('clear-annotation').hidden=true;});
+click('new-file',async()=>{const path=prompt('项目内文件路径，例如 src/model/game/Example.java');if(!path)return;await api('file','PUT',{path,content:'',expected_sha:null});await refreshWorkspace();await openFile(path);});
+click('annotate',async()=>captureSelection(true));
+click('selection-comment',async()=>{tab('discussion');el('comment').focus();});
+click('selection-question',async()=>{tab('chat');el('question').focus();});
+click('selection-clear',async()=>clearSelection());
+click('clear-annotation',async()=>clearSelection());
+click('explain-selection',async()=>{captureSelection();await askQuestion('请解释我选中的这段程序：先说明作用，再按语句或逻辑段解释，最后说明输入输出、调用关系和关键注意点。');});
+click('expand-chat',async()=>{const expanded=document.querySelector('.conversation')!.classList.toggle('expanded');el('expand-chat').textContent=expanded?'还原分区':'展开问答';});
 el<HTMLFormElement>('comment-form').addEventListener('submit',event=>{event.preventDefault();const button=el<HTMLFormElement>('comment-form').querySelector<HTMLButtonElement>('button[type=submit]')!;perform(button,async()=>{
   await saveAll();const mention=el<HTMLSelectElement>('mention').value;await api('comments','POST',{body:el<HTMLTextAreaElement>('comment').value,path:annotation?.path||'',line:annotation?.line||0,mentions:mention?[mention]:[]});
-  el<HTMLTextAreaElement>('comment').value='';annotation=null;el('annotation').hidden=true;el('clear-annotation').hidden=true;lastDiscussion='';await poll();
+  el<HTMLTextAreaElement>('comment').value='';lastDiscussion='';await poll();
 });});
-el<HTMLFormElement>('chat-form').addEventListener('submit',event=>{event.preventDefault();const button=el<HTMLFormElement>('chat-form').querySelector<HTMLButtonElement>('button[type=submit]')!;perform(button,async()=>{
-  await saveAll();const question=el<HTMLTextAreaElement>('question').value.trim();if(!question)return;
-  el('chat-list').append(article('你',question),article('项目助手','正在阅读当前项目并回答…'));el('chat-list').scrollTop=el('chat-list').scrollHeight;
-  try{await api('chat','POST',{question});el<HTMLTextAreaElement>('question').value='';renderChat(await api('chat'));}
-  catch(error){el('chat-list').lastElementChild?.remove();el('chat-list').append(article('未完成回答',(error as Error).message));throw error;}
-});});
+el<HTMLFormElement>('chat-form').addEventListener('submit',event=>{
+  event.preventDefault();const button=el('chat-form').querySelector<HTMLButtonElement>('button[type=submit]')!;
+  perform(button,async()=>{const question=el<HTMLTextAreaElement>('question').value.trim();if(question)await askQuestion(question);});
+});
 
 async function boot(){
   me=await api('me');csrf=me.csrf;el('login').hidden=true;el('studio').hidden=false;el('who').textContent=me.name+(me.team==='test'?' · 测试区':'');
   const style=getComputedStyle(document.documentElement);monaco.editor.defineTheme('xiangqi',{base:'vs',inherit:true,rules:[],colors:{'editor.background':style.getPropertyValue('--editor-bg').trim(),'editor.foreground':style.getPropertyValue('--editor-ink').trim(),'editor.lineHighlightBackground':style.getPropertyValue('--editor-line').trim()}});
   editor=monaco.editor.create(el('editor'),{theme:'xiangqi',automaticLayout:true,fontSize:14,fontFamily:style.getPropertyValue('--font-code'),minimap:{enabled:false},scrollBeyondLastLine:false,tabSize:4,wordWrap:'off',padding:{top:12},fixedOverflowWidgets:true,accessibilitySupport:'auto'});
+  setupLayout(me.id,layoutChanged);new ResizeObserver(layoutChanged).observe(document.querySelector('.screen-wrap')!);
+  editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyMod.Shift|monaco.KeyCode.KeyV,()=>{if(current.endsWith('.md')){mdMode=mdMode==='preview'?'code':'preview';updateFileMode();}});
   editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.KeyS,()=>saveAll().catch(e=>message(e.message,true)));
   monaco.editor.registerEditorOpener({openCodeEditor:async(_source,resource,selection)=>{
     if(resource.path.startsWith('/workspace/'))await openFile(resource.path.slice('/workspace/'.length));

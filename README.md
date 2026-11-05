@@ -12,12 +12,14 @@
 
 1. 输入自己的邀请码。右侧打开 Main 或其他源文件，编辑会自动保存到个人草稿；`Ctrl+S` 可立即保存。
 2. 点击“运行”。左侧编译并运行同一份 Java 源码，鼠标可直接操作 Swing 窗口。“放大”进入全屏，Esc 返回；“停止”释放运行资源。
-3. Java 索引就绪后，输入 `board.` 可获得真实对象成员，`(` 触发参数提示，F12 跳转定义。编译错误和运行日志在左下方。
+3. Java 索引就绪后，输入 `game.` 可获得真实对象成员，`(` 触发参数提示，F12 跳转定义。编译错误和运行日志在左下方。
 4. 点击“提交共同版本”才启动 CI 和三方合并；自动保存不会改变同伴的草稿。对方点击“同步共同版本”接收已合并内容。
-5. “下载 ZIP”导出完整 Maven 项目；在 IDEA 打开其中包含 `pom.xml` 的目录。离线修改后连同 `.xiangqi-studio.json` 一起打包上传，平台可识别共同基线。
-6. 留言区可写普通消息；选择代码行并点击“批注选中行”可绑定原文，再通过“提醒”选择同伴。被 @ 的人再次登录时能看到未读计数和对应批注。
+5. “下载 ZIP”导出完整 Maven 项目；在 IDEA 打开其中包含 `pom.xml` 的目录，运行 `src/Main.java`。版本信息放在 ZIP 注释中，解压后的课程项目没有平台专用文件。重新打包若丢失注释，上传后会保留为待选择基线的候选。
+6. 点击“选中当前行”，可选择“写批注”或“提问”；问答区的“解释选中程序”支持当前行和编辑器里选中的多行。批注可通过“提醒”选择同伴，被 @ 的人再次登录时能看到未读计数和原始代码。
+7. Markdown 默认显示排版后的内容，支持“代码 / 预览 / 对照”，调用关系图会渲染为 Mermaid 图。编辑后预览自动更新。
+8. 拖动分隔条调整画面、代码、目录、日志和底部讨论的大小。布局按浏览器和账号保存；“重置布局”恢复默认。“展开问答”便于阅读长回答。
 
-项目问答会读取当前已保存的完整 Java、Markdown 和 XML 快照以及最近对话，再发送一次 DeepSeek 请求。它没有工具、不会执行操作或改代码；每个账号的对话记录独立。编辑后发问会先保存，所以回答对应当前草稿。
+项目问答会一次准备当前已保存的完整 Java、Markdown 和 XML 快照、选中片段和最近对话，再交给 DeepSeek 流式回答。遇到长度限制会接续至多两次，仍使用同一份上下文；异常中断会保留已收到的文本并提供“继续回答”。它没有工具、不会执行操作或改代码；每个账号的对话记录独立。编辑后发问会先保存，所以回答对应当前草稿。
 
 ## ZIP 与冲突
 
@@ -37,7 +39,9 @@ ZIP 上限 25 MiB，展开后上限 100 MiB / 2000 个文件，单文件 10 MiB�
 |---|---|
 | `web/main.ts` | 页面、Monaco 编辑、异步保存、版本与留言交互、noVNC 画面 |
 | `web/lsp.ts` | Monaco 与标准 LSP 的补全、参数提示、定义及诊断连接 |
+| `web/markdown.ts`、`web/layout.ts` | 安全 Markdown 渲染与可拖动分区 |
 | `studio/app.py` | 登录、CSRF、项目 API、项目问答、WebSocket 转发 |
+| `studio/chat.py` | 固定项目上下文、选中代码定位、流式回答与中断识别 |
 | `studio/store.py` | SQLite 账号/消息记录、Git 快照、路径校验、ZIP 和草稿冲突 |
 | `studio/workflow.py` | 串行 CI、候选校验、三方合并及合并结果校验 |
 | `studio/runtime.py` | 两路会话限制及隔离容器管理 |
@@ -61,9 +65,9 @@ npm ci --ignore-scripts
 npm run check
 npm run build
 python -m pip install -e '.[test]'
-python -m pytest tests/test_collaboration.py tests/test_restart.py
+python -m pytest tests/test_collaboration.py tests/test_restart.py tests/test_chat.py tests/test_runtime.py
 ```
 
-`tests/live-api.py`、`tests/live-lsp.py`、`tests/live-browser.mjs` 只用于获授权的部署验收，默认使用本机受限文件里的两个测试邀请码。前者会在测试协作区创建明确命名的测试候选和留言；它们不会改正式共同版本。
+`tests/live-api.py`、`tests/live-lsp.py`、`tests/revision-browser.mjs`、`tests/code-browser.mjs` 只用于获授权的部署验收，默认使用本机受限文件里的两个测试邀请码。前者会在测试协作区创建明确命名的测试候选和留言；它们不会改正式共同版本。`tests/verify-course.py` 只读检查正式账号的源码和下载包。
 
 部署及恢复见 [运维说明](docs/运维说明.md)，功能边界见 [SPEC](docs/SPEC.md)，实际验证结果见 [验收记录](docs/验收记录.md)。
