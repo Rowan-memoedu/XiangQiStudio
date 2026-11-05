@@ -180,6 +180,7 @@ def test_api_auth_csrf_private_versions_and_mentions(tmp_path, monkeypatch):
     monkeypatch.setenv("XQ_ORIGIN", origin)
     app = create_app(tmp_path, Runner())
     codes = app.state.store.seed(INITIAL)
+    assert all(len(row['invitation_code']) == 8 for row in codes.values())
     a, b, outsider = [TestClient(app) for _ in range(3)]
     assert a.get("/api/workspace").status_code == 401
     for client, uid in [(a, "test-a"), (b, "test-b"), (outsider, "owner")]:

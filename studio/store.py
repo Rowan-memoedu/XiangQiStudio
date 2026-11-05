@@ -13,6 +13,7 @@ import threading
 import time
 import zipfile
 from contextlib import contextmanager
+from .invitations import new_code
 
 
 MAX_FILE = 10 * 1024 * 1024
@@ -172,7 +173,9 @@ class Store:
                                     ("test-a", "测试甲", "test"), ("test-b", "测试乙", "test")):
                 if db.execute("SELECT 1 FROM accounts WHERE id=?", (uid,)).fetchone():
                     continue
-                code = secrets.token_urlsafe(24)
+                code = new_code()
+                while db.execute('SELECT 1 FROM accounts WHERE code_hash=?', (digest(code),)).fetchone():
+                    code = new_code()
                 codes[uid] = {"name": name, "invitation_code": code}
                 db.execute("INSERT INTO accounts VALUES(?,?,?,?)", (uid, name, team, digest(code)))
                 head = self.repo(team).main()

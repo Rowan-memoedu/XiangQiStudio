@@ -4,7 +4,7 @@ from pathlib import Path
 root=Path("D:/AppData/XiangQiStudio")
 codes=json.loads((root/"invitations.json").read_text(encoding="utf-8"))
 lines=["# 象棋协作工作台登录", "", "入口：https://124.221.144.155/xiangqi/", "",
-       "每人使用自己的邀请码。邀请码就是登录凭据，请只交给对应使用者。", "",
+       "每人使用自己的 8 位邀请码，包含大写字母和数字。邀请码就是登录凭据，请只交给对应使用者。", "",
        "| 账号 | 用途 | 邀请码 |", "|---|---|---|"]
 for uid in ("owner","partner","test-a","test-b"):
     role="正式协作区" if uid in ("owner","partner") else "隔离测试区"
