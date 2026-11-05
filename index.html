@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>象棋 · 协作工作台</title></head>
+<body>
+<section id="login" class="login-shell">
+  <div class="login-title"><p class="eyebrow">CS109 / JAVA PROJECT</p><h1>中国象棋<span>协作工作台</span></h1><p>阅读代码，运行棋局，与同伴讨论每一次修改。</p><div class="login-rule"><span>Java 25</span><span>Swing</span><span>IntelliJ IDEA</span></div></div>
+  <form id="login-form"><h2>进入项目</h2><label for="invite">邀请码</label><input id="invite" type="password" autocomplete="current-password" required aria-describedby="login-error"><p class="muted">使用你的专属邀请码登录。</p><button class="primary" type="submit">打开工作台 <span aria-hidden="true">→</span></button><p id="login-error" role="alert"></p></form>
+</section>
+<main id="studio" hidden>
+  <header class="toolbar"><div class="brand">象棋<span>协作工作台</span></div><div class="actions"><button id="run" class="primary">运行 ▶</button><button id="save">保存</button><button id="submit">提交共同版本</button><button id="download">下载 ZIP</button><button id="upload">上传 ZIP</button><input id="zip-file" type="file" accept=".zip" hidden></div><div class="identity"><span id="who"></span><button id="logout" class="quiet">退出</button></div></header>
+  <div id="message" role="status" class="message" hidden></div>
+  <div class="workspace">
+    <section class="preview-column"><div class="section-bar"><h2>运行画面</h2><span id="run-status" class="muted">尚未运行</span><button id="fullscreen" class="quiet">放大</button><button id="stop" class="quiet">停止</button></div><div class="screen-wrap"><div id="screen" aria-label="可交互的 Java 象棋窗口"></div><div id="screen-empty"><strong>运行当前草稿</strong><p>编译 Java 后，这里显示可操作的 Swing 窗口。</p><button id="run-empty">编译并运行</button></div></div><details class="console" open><summary>编译与运行日志</summary><pre id="logs">点击「运行」开始。</pre></details></section>
+    <section class="code-column"><div class="section-bar"><h2>项目代码</h2><button id="toggle-tree" class="quiet" aria-expanded="false">文件</button><span id="save-status" class="muted">已保存</span><button id="pull" class="quiet">同步共同版本</button></div><div class="code-area"><nav id="tree" aria-label="项目文件"></nav><div class="editor-area"><div class="file-bar"><span id="file-name">选择文件</span><button id="annotate" class="quiet">批注选中行</button><button id="new-file" class="quiet">新建文件</button></div><div id="editor"></div></div></div>
+      <section class="conversation"><div class="tabs" role="tablist"><button id="tab-chat" role="tab" aria-selected="true" data-tab="chat">项目问答</button><button id="tab-discussion" role="tab" aria-selected="false" data-tab="discussion">留言与批注 <span id="unread"></span></button><button id="tab-versions" role="tab" aria-selected="false" data-tab="versions">版本与 CI</button></div>
+      <div id="pane-chat" class="pane"><div id="chat-list" class="feed"><p class="muted">可以问类的职责、调用关系，或一段代码为什么这样写。回答基于你已保存的当前草稿。</p></div><form id="chat-form" class="composer"><label class="sr-only" for="question">项目问题</label><textarea id="question" rows="2" placeholder="例如：点击棋子后，程序如何判断这一步是否合法？" required></textarea><button type="submit">提问</button></form></div>
+      <div id="pane-discussion" class="pane" hidden><div id="discussion-list" class="feed"></div><form id="comment-form" class="comment-composer"><div id="annotation" hidden></div><label class="sr-only" for="comment">留言内容</label><textarea id="comment" rows="2" placeholder="写留言，或先在代码中选择一行添加批注" required></textarea><div class="composer-actions"><label for="mention">提醒</label><select id="mention"><option value="">不 @</option></select><button id="clear-annotation" type="button" hidden>取消行批注</button><button type="submit">发送留言</button></div></form></div>
+      <div id="pane-versions" class="pane" hidden><div class="version-tools"><p class="muted">个人草稿自动保存；主动提交后才校验、合并。冲突保留双方版本。</p><div class="actions"><button id="resolve-draft">保留草稿并处理冲突</button><button id="recovery-download">导出本机恢复稿</button></div></div><div id="versions-list" class="feed"></div></div></section>
+    </section>
+  </div><footer><button id="lsp-reconnect" class="quiet">Java 语义服务连接中…</button><span id="workspace-state">个人草稿</span><span>Ctrl / ⌘ + S 保存 · F12 定义跳转</span></footer>
+</main>
+<dialog id="version-dialog"><div class="dialog-header"><h2 id="version-title">版本详情</h2><button id="close-dialog">关闭</button></div><p id="version-state"></p><div id="version-actions" class="actions"></div><details open><summary>与基线的代码差异</summary><pre id="version-diff"></pre></details><details open><summary>CI 与合并记录</summary><pre id="version-log"></pre></details></dialog>
+<script type="module" src="/web/main.ts"></script>
+</body></html>

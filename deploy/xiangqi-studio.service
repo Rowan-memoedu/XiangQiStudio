@@ -1,0 +1,26 @@
+[Unit]
+Description=XiangQi Studio private collaboration platform
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=xiangqi-studio
+Group=xiangqi-studio
+SupplementaryGroups=docker
+WorkingDirectory=/opt/xiangqi-studio
+EnvironmentFile=/etc/xiangqi-studio.env
+ExecStart=/opt/xiangqi-studio/.venv/bin/uvicorn studio.app:app --host 127.0.0.1 --port 18790 --proxy-headers --forwarded-allow-ips=127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/xiangqi-studio
+MemoryMax=384M
+CPUQuota=150%
+
+[Install]
+WantedBy=multi-user.target
