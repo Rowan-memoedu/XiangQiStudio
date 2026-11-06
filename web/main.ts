@@ -9,13 +9,15 @@ import './style.css';
 import './workbench.css';
 import { renderMarkdown, projectLink } from './markdown';
 import { setupLayout } from './layout';
+import { WorkspaceCache, type Workspace } from './workspace-cache';
 
 (self as any).MonacoEnvironment={getWorker:()=>new EditorWorker()};
 const base=import.meta.env.BASE_URL;
 const el=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 type Buffer={model:monaco.editor.ITextModel;sha:string|null;saved:string;dirty:boolean;blocked:boolean;saving:Promise<void>|null;timer?:ReturnType<typeof setTimeout>};
 const buffers=new Map<string,Buffer>();
-let csrf='',me:any,workspace:any,editor:monaco.editor.IStandaloneCodeEditor,language:JavaLanguage;
+let csrf='',me:any,workspace:Workspace,editor:monaco.editor.IStandaloneCodeEditor,language:JavaLanguage;
+let workspaceCache: WorkspaceCache;
 let current='',suppress=false,rfb:any=null,runRequested=false,annotation:{path:string,line:number}|null=null;
 type Selection = {path:string; start_line:number; end_line:number};
 let selection:Selection|null=null, mdMode='preview', generating=false;
@@ -26,7 +28,7 @@ let lastVersions='',lastDiscussion='',polling=false,openSequence=0;
 
 class ApiError extends Error {status:number;data:any;constructor(status:number,data:any){super(data.error||data.detail?.[0]?.msg||'请求未完成');this.status=status;this.data=data;}}
 async function api(path:string,method='GET',body?:any) {
-  const headers:Record<string,string>={};if(method!=='GET')headers['X-CSRF-Token']=csrf;
+  const headers:Record<string,string>={};if(csrf)headers['X-CSRF-Token']=csrf;
   if(body!==undefined && !(body instanceof FormData))headers['Content-Type']='application/json';
   const response=await fetch(base+'api/'+path,{method,headers,body:body===undefined?undefined:body instanceof FormData?body:JSON.stringify(body),credentials:'same-origin'});
   const data=await response.json().catch(()=>({error:`请求失败（${response.status}）`}));
@@ -47,6 +49,13 @@ async function saveBuffer(path:string,b:Buffer):Promise<void>{
   const content=b.model.getValue();
   b.saving=(async()=>{
     try{const result=await api('file','PUT',{path,content,expected_sha:b.sha});b.sha=result.sha;b.saved=content;b.dirty=b.model.getValue()!==content;
+      const file = workspace.files.find(file => file.path === path);
+      if (file) {
+        file.sha = result.sha;
+        file.size = new TextEncoder().encode(content).length;
+      }
+      workspace.head = result.head;
+      workspaceCache.rememberFile(path, {content, sha: result.sha});
       if(b.dirty)remember(path,b);else localStorage.removeItem(recoveryKey(path));language?.saved(b.model);
     }catch(error){if(error instanceof ApiError&&error.status===409){b.blocked=true;tab('versions');}remember(path,b);throw error;}
     finally{changed();}
@@ -59,7 +68,11 @@ async function openFile(path:string){
   const sequence=++openSequence;
   let buffer=buffers.get(path);
   if(!buffer){
-    const file=await api('file?'+new URLSearchParams({path}));
+    const expected = workspace.files.find(file => file.path === path)?.sha;
+    const cached = workspaceCache.file(path, expected);
+    const file = cached ?? await api('file?' + new URLSearchParams({path}));
+    if (sequence !== openSequence) return;
+    if (!cached) workspaceCache.rememberFile(path, file);
     const uri=monaco.Uri.from({scheme:'file',path:'/workspace/'+path});
     const type=path.endsWith('.java')?'java':path.endsWith('.xml')?'xml':path.endsWith('.md')?'markdown':'plaintext';
     const model=monaco.editor.createModel(file.content,type,uri);
@@ -74,6 +87,7 @@ async function openFile(path:string){
   }
   if(sequence!==openSequence)return;
   current=path;editor.updateOptions({readOnly:false});editor.setModel(buffer.model);el('file-name').textContent=path;
+  workspaceCache.select(path);
   document.querySelectorAll<HTMLButtonElement>('#tree button').forEach(button=>button.classList.toggle('selected',button.dataset.path===path));
   updateFileMode();if(!path.endsWith('.md')||mdMode!=='preview')editor.focus();changed();
 }
@@ -141,20 +155,40 @@ function layoutChanged(){
 function tree(files:any[]){
   const root:any={};for(const file of files){let node=root;const parts=file.path.split('/');parts.forEach((part:string,index:number)=>{node[part]??=index===parts.length-1?{_file:file.path}:{};node=node[part];});}
   function render(node:any,parent:HTMLElement){for(const name of Object.keys(node).sort((a,b)=>Number(!!node[a]._file)-Number(!!node[b]._file)||a.localeCompare(b))){
-    if(node[name]._file){const button=document.createElement('button');button.textContent=name;button.dataset.path=node[name]._file;button.title=node[name]._file;button.addEventListener('click',()=>openFile(node[name]._file).catch(e=>message(e.message,true)));parent.append(button);}
+    if(node[name]._file){const button=document.createElement('button');button.textContent=name;button.dataset.path=node[name]._file;button.title=node[name]._file;button.classList.toggle('selected',node[name]._file===current);button.addEventListener('click',()=>openFile(node[name]._file).catch(e=>message(e.message,true)));parent.append(button);}
     else{const details=document.createElement('details');details.open=true;const summary=document.createElement('summary');summary.textContent=name;const children=document.createElement('div');details.append(summary,children);parent.append(details);render(node[name],children);}
   }}
   el('tree').replaceChildren();render(root,el('tree'));
 }
 
-async function refreshWorkspace(reload=false){
-  workspace=await api('workspace');tree(workspace.files);
+function showWorkspace(snapshot: Workspace) {
+  if (workspace?.head !== snapshot.head) tree(snapshot.files);
+  workspace = snapshot;
+  workspaceCache.workspace = snapshot;
+  workspaceCache.persist();
   el('workspace-state').textContent=workspace.base===workspace.shared?'个人草稿 · 共同版本已同步':'个人草稿 · 有新的共同版本';
-  if(reload){for(const [path,b]of buffers){if(b.dirty)continue;const version=b.model.getVersionId();const file=await api('file?'+new URLSearchParams({path}));
-    if(b.dirty||b.model.getVersionId()!==version)continue;
+}
+
+function initialFile() {
+  const files = workspace.files;
+  return files.find(file => file.path === workspaceCache.lastPath)
+    ?? files.find(file => file.path.endsWith('/Main.java')) ?? files[0];
+}
+
+async function refreshWorkspace(reload=false){
+  showWorkspace(await api('workspace'));
+  if (!reload) return;
+  for (const [path, b] of buffers) {
+    const latest = workspace.files.find(file => file.path === path);
+    if (b.dirty || !latest || latest.sha === b.sha) continue;
+    const version = b.model.getVersionId();
+    const file = await api('file?' + new URLSearchParams({path}));
+    if (buffers.get(path) !== b || b.dirty || b.model.getVersionId() !== version) continue;
+    workspaceCache.rememberFile(path, file);
     suppress=true;try{b.model.setValue(file.content);b.sha=file.sha;b.saved=file.content;b.blocked=false;}finally{suppress=false;}
+    if (path === current && path.endsWith('.md')) scheduleMarkdown();
     language?.change(b.model);
-  }}
+  }
 }
 
 function tab(name:string){revealPanel?.('discussion');for(const id of ['chat','discussion','versions']){el('pane-'+id).hidden=id!==name;el('tab-'+id).setAttribute('aria-selected',String(id===name));}}
@@ -291,7 +325,7 @@ click('resolve-draft',async()=>{
   }finally{editor.updateOptions({readOnly:false});}
 });
 click('recovery-download',async()=>{const saved:Record<string,string>={};for(const key of Object.keys(localStorage))if((key.startsWith('xq-preserved:')&&key.includes(`xq-draft:${me.id}:`))||key.startsWith(`xq-draft:${me.id}:`))saved[key]=localStorage.getItem(key)!;const blob=new Blob([JSON.stringify(saved,null,2)],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='xiangqi-local-drafts.json';link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);});
-click('logout',async()=>{await saveAll();await api('stop','POST');language?.dispose();await api('logout','POST');location.reload();});
+click('logout',async()=>{await saveAll();await api('stop','POST');language?.dispose();await api('logout','POST');workspaceCache.clear();location.reload();});
 click('close-dialog',async()=>el<HTMLDialogElement>('version-dialog').close());
 async function reconnectLanguage(){language?.dispose();await new Promise(resolve=>setTimeout(resolve,600));language=new JavaLanguage(wsUrl('lsp'),text=>el('lsp-reconnect').textContent=text);}
 click('lsp-reconnect',reconnectLanguage);
@@ -313,6 +347,7 @@ el<HTMLFormElement>('chat-form').addEventListener('submit',event=>{
 
 async function boot(){
   me=await api('me');csrf=me.csrf;el('login').hidden=true;el('studio').hidden=false;el('who').textContent=me.name+(me.team==='test'?' · 测试区':'');
+  workspaceCache = new WorkspaceCache(me.id);
   const style=getComputedStyle(document.documentElement);monaco.editor.defineTheme('xiangqi',{base:'vs',inherit:true,rules:[],colors:{'editor.background':style.getPropertyValue('--editor-bg').trim(),'editor.foreground':style.getPropertyValue('--editor-ink').trim(),'editor.lineHighlightBackground':style.getPropertyValue('--editor-line').trim()}});
   editor=monaco.editor.create(el('editor'),{theme:'xiangqi',automaticLayout:true,fontSize:14,fontFamily:style.getPropertyValue('--font-code'),minimap:{enabled:false},scrollBeyondLastLine:false,tabSize:4,wordWrap:'off',padding:{top:12},fixedOverflowWidgets:true,accessibilitySupport:'auto'});
   revealPanel = setupLayout(me.id, layoutChanged, error => message(error, true));
@@ -327,9 +362,32 @@ async function boot(){
     if(selection){if('startLineNumber'in selection){editor.setSelection(selection);editor.revealRangeInCenter(selection);}else{editor.setPosition(selection);editor.revealPositionInCenter(selection);}}return true;
   }});
   language=new JavaLanguage(wsUrl('lsp'),text=>el('lsp-reconnect').textContent=text);
-  await refreshWorkspace();await openFile(workspace.files.find((f:any)=>f.path.endsWith('/Main.java'))?.path||workspace.files[0].path);
-  const chat=await api('chat');if(chat.length)renderChat(chat);await poll();setInterval(poll,2500);
-  const status=await api('runtime').catch(()=>null);if(status?.state==='running'){runRequested=true;layoutChanged();await poll();}
+  if (workspaceCache.workspace) {
+    showWorkspace(workspaceCache.workspace);
+    const file = initialFile();
+    if (file && workspaceCache.file(file.path, file.sha)) await openFile(file.path);
+  }
+  try {
+    await refreshWorkspace(true);
+    if (!current || (!workspace.files.some(file => file.path === current) && !buffers.get(current)?.dirty)) {
+      const file = initialFile();
+      if (file) await openFile(file.path);
+    }
+  } catch (error) {
+    message(current ? '已打开本机缓存。暂时无法核对服务器版本。' : (error as Error).message, true);
+  }
+  void api('chat').then(chat => {
+    if (chat.length && !generating && !el('chat-list').querySelector('article')) renderChat(chat);
+  }).catch(() => {});
+  void api('runtime').then(status => {
+    if (status.state === 'running') {
+      runRequested = true;
+      layoutChanged();
+      void poll();
+    }
+  }).catch(() => {});
+  void poll();
+  setInterval(poll,2500);
 }
 el<HTMLFormElement>('login-form').addEventListener('submit',event=>{event.preventDefault();const button=el<HTMLFormElement>('login-form').querySelector<HTMLButtonElement>('button[type=submit]')!;button.disabled=true;
   api('login','POST',{code:el<HTMLInputElement>('invite').value.trim()}).then(boot).catch(error=>{el('login-error').textContent=error.message;el('invite').setAttribute('aria-invalid','true');}).finally(()=>button.disabled=false);

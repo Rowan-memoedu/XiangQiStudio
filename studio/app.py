@@ -14,7 +14,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .runtime import Runtime
-from .store import Store, Problem, digest
+from .store import Store, Problem, digest, SESSION_MAX_AGE
 from .workflow import Workflow
 from .chat import answer_events, selected_source
 
@@ -88,15 +88,28 @@ def create_app(data_dir=None, runner=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
-        response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
+        path = request.url.path
+        if path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        elif path.startswith("/assets/") and response.status_code in (200, 304):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
         return response
 
     def user(request: Request):
         account = store.authenticate(request.cookies.get("xq_session"))
-        if request.method not in ("GET", "HEAD") and request.headers.get("x-csrf-token") != account["csrf"]:
+        token = request.headers.get("x-csrf-token")
+        # A page that supplies its session token must not read another account
+        # after a different tab changes the browser's login cookie.
+        if (request.method not in ("GET", "HEAD") or token is not None) and token != account["csrf"]:
             raise Problem("会话校验失败，请重新登录", 403)
         return account
+
+    def remember_session(response, token):
+        response.set_cookie("xq_session", token, max_age=SESSION_MAX_AGE, httponly=True,
+                            secure=origin.startswith("https:"), samesite="strict", path=cookie_path)
 
     @app.get("/api/health")
     def health():
@@ -115,8 +128,7 @@ def create_app(data_dir=None, runner=None):
             attempts.append(now)
         token, csrf = store.login(payload.code.strip())
         response = JSONResponse({"csrf": csrf})
-        response.set_cookie("xq_session", token, max_age=7 * 86400, httponly=True,
-                            secure=origin.startswith("https:"), samesite="strict", path=cookie_path)
+        remember_session(response, token)
         return response
 
     @app.post("/api/logout")
@@ -128,7 +140,10 @@ def create_app(data_dir=None, runner=None):
         return response
 
     @app.get("/api/me")
-    def me(account=Depends(user)):
+    def me(request: Request, response: Response, account=Depends(user)):
+        token = request.cookies["xq_session"]
+        if store.renew_session(token):
+            remember_session(response, token)
         return account
 
     @app.get("/api/workspace")

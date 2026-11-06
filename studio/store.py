@@ -15,6 +15,8 @@ import zipfile
 from contextlib import contextmanager
 from .invitations import new_code
 
+SESSION_MAX_AGE = 365 * 86400
+
 
 MAX_FILE = 10 * 1024 * 1024
 MAX_PROJECT = 100 * 1024 * 1024
@@ -190,8 +192,17 @@ class Store:
             if not account:
                 raise Problem("邀请码不正确", 401)
             session, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
-            db.execute("INSERT INTO sessions VALUES(?,?,?,?)", (digest(session), account["id"], csrf, time.time() + 7 * 86400))
+            db.execute("INSERT INTO sessions VALUES(?,?,?,?)", (digest(session), account["id"], csrf, time.time() + SESSION_MAX_AGE))
         return session, csrf
+
+    def renew_session(self, token):
+        now = time.time()
+        expires = now + SESSION_MAX_AGE
+        with self.db() as db:
+            return db.execute(
+                "UPDATE sessions SET expires=? WHERE hash=? AND expires>? AND expires<?",
+                (expires, digest(token), now, expires - 86400)
+            ).rowcount == 1
 
     def authenticate(self, token):
         with self.db() as db:

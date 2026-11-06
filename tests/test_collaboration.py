@@ -205,3 +205,31 @@ def test_api_auth_csrf_private_versions_and_mentions(tmp_path, monkeypatch):
     assert a.post("/api/logout").status_code == 200
     assert a.get("/api/workspace").status_code == 401
     app.state.workflow.executor.shutdown()
+
+
+def test_remembered_session_renews_existing_cookie_and_checks_read_identity(tmp_path, monkeypatch):
+    import time
+    from studio.store import SESSION_MAX_AGE
+
+    origin = "http://testserver"
+    monkeypatch.setenv("XQ_ORIGIN", origin)
+    app = create_app(tmp_path, Runner())
+    store = app.state.store
+    codes = store.seed(INITIAL)
+    with TestClient(app) as client:
+        login = client.post("/api/login", json={"code": codes["test-a"]["invitation_code"]},
+                            headers={"Origin": origin})
+        assert f"Max-Age={SESSION_MAX_AGE}" in login.headers["set-cookie"]
+        token = client.cookies.get("xq_session")
+        with store.db() as db:
+            db.execute("UPDATE sessions SET expires=? WHERE hash=?", (time.time() + 7 * 86400, digest(token)))
+        remembered = client.get("/api/me")
+        assert remembered.json()["id"] == "test-a"
+        assert f"Max-Age={SESSION_MAX_AGE}" in remembered.headers["set-cookie"]
+        assert client.cookies.get("xq_session") == token
+        assert "set-cookie" not in client.get("/api/me").headers
+        assert client.get("/api/workspace", headers={"X-CSRF-Token": "previous-tab"}).status_code == 403
+        with store.db() as db:
+            db.execute("UPDATE sessions SET expires=? WHERE hash=?", (time.time() - 1, digest(token)))
+        assert client.get("/api/me").status_code == 401
+    app.state.workflow.executor.shutdown()
