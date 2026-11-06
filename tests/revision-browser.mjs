@@ -9,6 +9,11 @@ const login=await context.request.post(base+'api/login',{headers:{Origin:origin}
 if(!login.ok())throw Error('Login '+login.status());
 const csrf=(await login.json()).csrf,headers={Origin:origin,'X-CSRF-Token':csrf};
 const page=await context.newPage(),errors=[],report={};page.on('pageerror',e=>errors.push(e.message));
+async function toolbarAction(selector) {
+  if (!await page.locator('#workspace-toolbar').isVisible()) await page.locator('#toolbar-toggle').click();
+  await page.locator(selector).click();
+  await page.keyboard.press('Escape');
+}
 const file=async path=>(await(await context.request.get(base+'api/file',{params:{path}})).json());
 const open=async path=>{await page.locator('#tree button').filter({hasText:new RegExp('^'+path.split('/').at(-1).replaceAll('.','\\.')+'$')}).first().click();await expect(page.locator('#file-name')).toHaveText(path);};
 let originalReadme;
@@ -37,8 +42,8 @@ try{
   const codeBefore=await page.locator('.code-area').boundingBox();await drag('code',0,-90);const codeAfter=await page.locator('.code-area').boundingBox();if(codeBefore.height-codeAfter.height<60)throw Error('Code splitter failed');
   const treeBefore=await page.locator('#tree').boundingBox();await drag('tree',35,0);if((await page.locator('#tree').boundingBox()).width-treeBefore.width<25)throw Error('Tree splitter failed');
   const logBefore=await page.locator('.console').boundingBox();await drag('logs',0,-40);if((await page.locator('.console').boundingBox()).height-logBefore.height<30)throw Error('Log splitter failed');
-  report.splitters=true;await page.locator('#reset-layout').click();
-  await page.locator('#run').click();await expect(page.locator('#run-status')).toHaveText('运行中',{timeout:120000});
+  report.splitters=true;await toolbarAction('#reset-layout');
+  await toolbarAction('#run');await expect(page.locator('#run-status')).toHaveText('运行中',{timeout:120000});
   await page.waitForFunction(()=>{const c=document.querySelector('#screen canvas');if(!c||c.width<700)return false;const p=c.getContext('2d').getImageData(4,4,1,1).data;return p[0]>100&&p[1]>100&&p[2]>100;},{},{timeout:45000});
   async function fit(){const m=await page.locator('#screen canvas').evaluate(c=>{const b=c.getBoundingClientRect(),s=document.querySelector('#screen').getBoundingClientRect();return{width:c.width,height:c.height,display:b.width/b.height,pane:s.width/s.height,gapX:s.width-b.width,gapY:s.height-b.height};});if(Math.abs(m.display-m.pane)>.012||m.gapX>3||m.gapY>3)throw Error('Canvas does not fill pane '+JSON.stringify(m));return m;}
   report.canvas=await fit();await page.screenshot({path:output+'/running.png',fullPage:true});
@@ -54,7 +59,7 @@ try{
   await expect.poll(()=>redCount(to),{timeout:10000}).toBeGreaterThan(20);if(await redCount(from)>10)throw Error('Pawn remained at origin');report.swingClick=true;
   await drag('columns',130,0);await expect.poll(async()=>{try{await fit();return true;}catch{return false;}},{timeout:15000}).toBe(true);
   report.resizedCanvas=await fit();await page.screenshot({path:output+'/resized.png',fullPage:true});console.log('PASS four splitters and responsive Swing capture',report.canvas,report.resizedCanvas);
-  await page.locator('#reset-layout').click();await open('src/Main.java');
+  await toolbarAction('#reset-layout');await open('src/Main.java');
   await expect(page.locator('#lsp-reconnect')).toContainText('已就绪',{timeout:90000});
   const source=await file('src/Main.java'),lines=source.content.split('\n'),line=lines.findIndex(l=>l.includes('Game game ='));
   if(line<0)throw Error('Game assembly line missing');
@@ -75,10 +80,10 @@ try{
   await page.route('**/api/chat',route=>route.fulfill({json:[{role:'user',content:'长回答显示测试'},{role:'assistant',content:longText,finish_reason:'stop'}]}));
   await page.locator('#question').fill('长回答显示测试');await page.locator('#chat-form button[type=submit]').click();
   await expect(page.locator('#chat-list .markdown').last()).toContainText('最后一段已完整显示。');
-  await page.locator('#expand-chat').click();await page.locator('#chat-list').evaluate(e=>e.scrollTop=e.scrollHeight);
+  await page.locator('[data-maximize=discussion]').click();await page.locator('#chat-list').evaluate(e=>e.scrollTop=e.scrollHeight);
   const end=page.getByText('最后一段已完整显示。',{exact:true});await expect(end).toBeInViewport();
-  await page.screenshot({path:output+'/long-answer.png',fullPage:true});report.longAnswerCharacters=longText.length;await page.locator('#expand-chat').click();
-  const downloadEvent=page.waitForEvent('download');await page.locator('#download').click();await(await downloadEvent).saveAs(output+'/browser-project.zip');report.download=true;
+  await page.screenshot({path:output+'/long-answer.png',fullPage:true});report.longAnswerCharacters=longText.length;await page.locator('[data-maximize=discussion]').click();
+  const downloadEvent=page.waitForEvent('download');await toolbarAction('#download');await(await downloadEvent).saveAs(output+'/browser-project.zip');report.download=true;
   report.layouts=[];for(const width of [320,375,414,768,1280,1440]){await page.setViewportSize({width,height:1000});await page.waitForTimeout(200);const value=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));if(value.scroll>width+1)throw Error('Horizontal overflow '+JSON.stringify(value));report.layouts.push(value);}
   report.errors=errors;if(errors.length)throw Error(errors.join('\n'));console.log('PASS long-answer scroll, ZIP download and responsive widths');
   await fs.writeFile(output+'/browser-results.json',JSON.stringify(report,null,2));

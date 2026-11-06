@@ -19,7 +19,8 @@ try{
   await lineContaining('frame.setVisible(true);');await page.keyboard.press('End');await page.keyboard.press('Enter');
   const color='frame.getBoardPanel().setBackground(new java.awt.Color(210, 235, 220));';await page.keyboard.insertText(color);
   await expect.poll(async()=>(await read()).content,{timeout:15000}).toContain(color);
-  await page.locator('#run').click();await expect(page.locator('#run-status')).toHaveText('运行中',{timeout:120000});
+  await page.locator('#toolbar-toggle').click();await page.locator('#run').click();await page.keyboard.press('Escape');
+  await expect(page.locator('#run-status')).toHaveText('运行中',{timeout:120000});
   await page.waitForFunction(()=>{const c=document.querySelector('#screen canvas');if(!c||c.width<700)return false;const ctx=c.getContext('2d');let n=0;for(let y=100;y<c.height-60;y+=40)for(let x=50;x<c.width-350;x+=40){const p=ctx.getImageData(x,y,1,1).data;if(Math.abs(p[0]-210)<5&&Math.abs(p[1]-235)<5&&Math.abs(p[2]-220)<5)n++;}return n>30;},{},{timeout:45000});
   await page.screenshot({path:output+'/edited-java.png',fullPage:true});console.log('PASS Java edit → async save → compile → changed Swing rendering');
   await expect(page.locator('#lsp-reconnect')).toContainText('已就绪',{timeout:90000});

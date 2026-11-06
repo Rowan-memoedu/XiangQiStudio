@@ -20,6 +20,8 @@ let current='',suppress=false,rfb:any=null,runRequested=false,annotation:{path:s
 type Selection = {path:string; start_line:number; end_line:number};
 let selection:Selection|null=null, mdMode='preview', generating=false;
 let previewTimer:ReturnType<typeof setTimeout>, viewportTimer:ReturnType<typeof setTimeout>, lastViewport='';
+let viewportRequest = Promise.resolve();
+let revealPanel: ReturnType<typeof setupLayout> | undefined;
 let lastVersions='',lastDiscussion='',polling=false,openSequence=0;
 
 class ApiError extends Error {status:number;data:any;constructor(status:number,data:any){super(data.error||data.detail?.[0]?.msg||'请求未完成');this.status=status;this.data=data;}}
@@ -110,13 +112,27 @@ function clearSelection(){
 }
 function viewportSize(){
   const bounds=document.querySelector('.screen-wrap')!.getBoundingClientRect();
-  const scale=Math.max(810/Math.max(1,bounds.width),650/Math.max(1,bounds.height),1);
-  return {width:Math.min(4096,Math.round(bounds.width*scale)),height:Math.min(3072,Math.round(bounds.height*scale))};
+  if (!bounds.width || !bounds.height) return;
+  const minimumScale = Math.max(810 / bounds.width, 650 / bounds.height, 1);
+  const scale = Math.min(minimumScale, 4096 / bounds.width, 3072 / bounds.height);
+  return {
+    width: Math.max(810, Math.round(bounds.width * scale)),
+    height: Math.max(650, Math.round(bounds.height * scale))
+  };
 }
-async function syncViewport(force=false){
-  if(!me||(!runRequested&&!force))return;
-  const size=viewportSize(),value=JSON.stringify(size);if(value===lastViewport&&!force)return;
-  await api('viewport','POST',size);lastViewport=value;
+function syncViewport(force=false){
+  // Read dimensions when the request runs, and never let a hidden panel resize the game.
+  const update = viewportRequest.then(async () => {
+    if (!me || (!runRequested && !force)) return;
+    const size = viewportSize();
+    if (!size) return;
+    const value = JSON.stringify(size);
+    if (value === lastViewport && !force) return;
+    await api('viewport', 'POST', size);
+    lastViewport = value;
+  });
+  viewportRequest = update.catch(() => {});
+  return update;
 }
 function layoutChanged(){
   editor?.layout();clearTimeout(viewportTimer);viewportTimer=setTimeout(()=>syncViewport().catch(e=>message(e.message,true)),250);
@@ -141,7 +157,7 @@ async function refreshWorkspace(reload=false){
   }}
 }
 
-function tab(name:string){for(const id of ['chat','discussion','versions']){el('pane-'+id).hidden=id!==name;el('tab-'+id).setAttribute('aria-selected',String(id===name));}}
+function tab(name:string){revealPanel?.('discussion');for(const id of ['chat','discussion','versions']){el('pane-'+id).hidden=id!==name;el('tab-'+id).setAttribute('aria-selected',String(id===name));}}
 document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(button=>button.addEventListener('click',()=>tab(button.dataset.tab!)));
 
 function article(byline:string,body:string){const item=document.createElement('article');const who=document.createElement('div');who.className='byline';who.textContent=byline;const content=document.createElement('div');content.className='content';content.textContent=body;item.append(who,content);return item;}
@@ -241,6 +257,7 @@ async function poll(){
     const discussionString=JSON.stringify(discussion);if(discussionString!==lastDiscussion){renderDiscussion(discussion);lastDiscussion=discussionString;}
     if(runRequested){const status=await api('runtime');el('logs').textContent=status.log||'正在准备运行环境…';el('run-status').textContent=status.ready?'运行中':status.state==='running'?'正在编译…':status.state==='exited'?'运行已结束':'尚未运行';
       if(status.ready&&!rfb){el('screen-empty').hidden=true;const connection=new RFB(el('screen'),wsUrl('vnc'),{shared:true});rfb=connection;rfb.scaleViewport=true;rfb.resizeSession=false;rfb.viewOnly=false;
+        connection.background = 'var(--color-panel)';
         connection.addEventListener('disconnect',()=>{if(rfb===connection)rfb=null;});
       }
     }
@@ -248,9 +265,8 @@ async function poll(){
   finally{polling=false;}
 }
 
-async function start(){await saveAll();rfb?.disconnect();rfb=null;el('screen-empty').hidden=false;await syncViewport(true);await api('run','POST');runRequested=true;el('run-status').textContent='正在编译…';await poll();}
+async function start(){revealPanel?.('preview');await saveAll();rfb?.disconnect();rfb=null;el('screen-empty').hidden=false;await syncViewport(true);await api('run','POST');runRequested=true;el('run-status').textContent='正在编译…';await poll();}
 click('run',start);click('run-empty',start);
-click('fullscreen',async()=>{await document.querySelector<HTMLElement>('.screen-wrap')!.requestFullscreen();});
 click('toggle-tree',async()=>{const visible=document.querySelector('.code-area')!.classList.toggle('show-tree');el('toggle-tree').setAttribute('aria-expanded',String(visible));});
 click('stop',async()=>{await api('stop','POST');runRequested=false;rfb?.disconnect();rfb=null;el('screen-empty').hidden=false;el('run-status').textContent='已停止';});
 click('save',saveAll);
@@ -286,7 +302,6 @@ click('selection-question',async()=>{tab('chat');el('question').focus();});
 click('selection-clear',async()=>clearSelection());
 click('clear-annotation',async()=>clearSelection());
 click('explain-selection',async()=>{captureSelection();await askQuestion('请解释我选中的这段程序：先说明作用，再按语句或逻辑段解释，最后说明输入输出、调用关系和关键注意点。');});
-click('expand-chat',async()=>{const expanded=document.querySelector('.conversation')!.classList.toggle('expanded');el('expand-chat').textContent=expanded?'还原分区':'展开问答';});
 el<HTMLFormElement>('comment-form').addEventListener('submit',event=>{event.preventDefault();const button=el<HTMLFormElement>('comment-form').querySelector<HTMLButtonElement>('button[type=submit]')!;perform(button,async()=>{
   await saveAll();const mention=el<HTMLSelectElement>('mention').value;await api('comments','POST',{body:el<HTMLTextAreaElement>('comment').value,path:annotation?.path||'',line:annotation?.line||0,mentions:mention?[mention]:[]});
   el<HTMLTextAreaElement>('comment').value='';lastDiscussion='';await poll();
@@ -300,7 +315,8 @@ async function boot(){
   me=await api('me');csrf=me.csrf;el('login').hidden=true;el('studio').hidden=false;el('who').textContent=me.name+(me.team==='test'?' · 测试区':'');
   const style=getComputedStyle(document.documentElement);monaco.editor.defineTheme('xiangqi',{base:'vs',inherit:true,rules:[],colors:{'editor.background':style.getPropertyValue('--editor-bg').trim(),'editor.foreground':style.getPropertyValue('--editor-ink').trim(),'editor.lineHighlightBackground':style.getPropertyValue('--editor-line').trim()}});
   editor=monaco.editor.create(el('editor'),{theme:'xiangqi',automaticLayout:true,fontSize:14,fontFamily:style.getPropertyValue('--font-code'),minimap:{enabled:false},scrollBeyondLastLine:false,tabSize:4,wordWrap:'off',padding:{top:12},fixedOverflowWidgets:true,accessibilitySupport:'auto'});
-  setupLayout(me.id,layoutChanged);new ResizeObserver(layoutChanged).observe(document.querySelector('.screen-wrap')!);
+  revealPanel = setupLayout(me.id, layoutChanged, error => message(error, true));
+  new ResizeObserver(layoutChanged).observe(document.querySelector('.screen-wrap')!);
   editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyMod.Shift|monaco.KeyCode.KeyV,()=>{if(current.endsWith('.md')){mdMode=mdMode==='preview'?'code':'preview';updateFileMode();}});
   editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.KeyS,()=>saveAll().catch(e=>message(e.message,true)));
   monaco.editor.registerEditorOpener({openCodeEditor:async(_source,resource,selection)=>{
@@ -313,7 +329,7 @@ async function boot(){
   language=new JavaLanguage(wsUrl('lsp'),text=>el('lsp-reconnect').textContent=text);
   await refreshWorkspace();await openFile(workspace.files.find((f:any)=>f.path.endsWith('/Main.java'))?.path||workspace.files[0].path);
   const chat=await api('chat');if(chat.length)renderChat(chat);await poll();setInterval(poll,2500);
-  const status=await api('runtime').catch(()=>null);if(status?.state==='running'){runRequested=true;await poll();}
+  const status=await api('runtime').catch(()=>null);if(status?.state==='running'){runRequested=true;layoutChanged();await poll();}
 }
 el<HTMLFormElement>('login-form').addEventListener('submit',event=>{event.preventDefault();const button=el<HTMLFormElement>('login-form').querySelector<HTMLButtonElement>('button[type=submit]')!;button.disabled=true;
   api('login','POST',{code:el<HTMLInputElement>('invite').value.trim()}).then(boot).catch(error=>{el('login-error').textContent=error.message;el('invite').setAttribute('aria-invalid','true');}).finally(()=>button.disabled=false);
