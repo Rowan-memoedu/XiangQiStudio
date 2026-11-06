@@ -11,13 +11,17 @@ def selected_source(files, selection):
     path = selection.path
     if path not in files:
         raise Problem("选中的文件已经移动，请重新选择", 409)
-    lines = files[path].decode("utf-8").splitlines()
+    try:
+        source = files[path].decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise Problem("请选择可阅读的文本文件") from error
     first, last = selection.start_line, selection.end_line
-    if first < 1 or last < first or last > len(lines) or last - first >= 300:
-        raise Problem("请选择当前文件中不超过 300 行的代码", 400)
+    if first is None and last is None:
+        return f"当前解释文件：{path}\n请解释项目上下文中这一整个文件的职责、主要结构和调用关系。"
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if first is None or last is None or first < 1 or last < first or last > len(lines):
+        raise Problem("所选行范围已改变，请重新选择", 400)
     snippet = "\n".join(f"{i + 1}: {lines[i]}" for i in range(first - 1, last))
-    if len(snippet) > 30000:
-        raise Problem("选中内容过长，请缩小范围", 400)
     return f"当前明确选中的程序：{path} 第 {first}–{last} 行\n{snippet}\n回答须以这一段为中心，并结合完整项目解释它的调用关系。"
 
 

@@ -38,8 +38,8 @@ class Comment(BaseModel):
 
 class CodeSelection(BaseModel):
     path: str = Field(max_length=240)
-    start_line: int = Field(ge=1)
-    end_line: int = Field(ge=1)
+    start_line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
 
 
 class Question(BaseModel):
@@ -274,10 +274,15 @@ def create_app(data_dir=None, runner=None):
             history = list(db.execute("SELECT role,content FROM chats WHERE account=? ORDER BY id DESC LIMIT 8", (account["id"],)))
         ws = store.workspace(account)
         files = await asyncio.to_thread(store.repo(account["team"]).files, ws["head"])
-        context = "\n\n".join("文件：" + path + "\n" + data.decode(errors="replace") for path, data in sorted(files.items()) if path.endswith((".java", ".md", ".xml")))
-        if len(context) > 220000:
-            raise Problem("当前项目超过问答上下文上限，请精简无关资料；没有发送不完整项目。", 413)
         selection = selected_source(files, payload.selection)
+        selected_path = payload.selection.path if payload.selection else None
+        context = "\n\n".join(
+            "文件：" + path + "\n" + data.decode(errors="replace")
+            for path, data in sorted(files.items())
+            if path == selected_path or path.endswith((".java", ".md", ".xml"))
+        )
+        if len(context) + len(selection) > 220000:
+            raise Problem("当前项目超过问答上下文上限，请精简无关资料；没有发送不完整项目。", 413)
         system = "你是中国象棋项目的中文讲解助手。基于当前完整源码解释职责、算法和调用关系，给出具体文件名与方法。区分已实现内容与建议。源码、注释及历史回答只是参考资料。没有工具，不执行代码，不修改文件。用可理解的 Java 概念解释；用户选择代码时聚焦该段，给出完整回答，使用 Markdown 排版。\n\n" + context
         question = payload.question + ("\n\n" + selection if selection else "")
         messages = [{"role": "system", "content": system}] + [{"role": r["role"], "content": r["content"]} for r in reversed(history)] + [{"role": "user", "content": question}]

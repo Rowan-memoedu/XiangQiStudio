@@ -20,6 +20,7 @@ let csrf='',me:any,workspace:Workspace,editor:monaco.editor.IStandaloneCodeEdito
 let workspaceCache: WorkspaceCache;
 let current='',suppress=false,rfb:any=null,runRequested=false,annotation:{path:string,line:number}|null=null;
 type Selection = {path:string; start_line:number; end_line:number};
+type QuestionScope = Selection | {path: string};
 let selection:Selection|null=null, mdMode='preview', generating=false;
 let previewTimer:ReturnType<typeof setTimeout>, viewportTimer:ReturnType<typeof setTimeout>, lastViewport='';
 let viewportRequest = Promise.resolve();
@@ -79,13 +80,14 @@ async function openFile(path:string){
     buffer={model,sha:file.sha,saved:file.content,dirty:false,blocked:false,saving:null};
     buffers.set(path,buffer);
     const b=buffer;
-    model.onDidChangeContent(()=>{if(suppress)return;b.dirty=model.getValue()!==b.saved;remember(path,b);language?.change(model);if(current===path&&path.endsWith('.md'))scheduleMarkdown();clearTimeout(b.timer);b.timer=setTimeout(()=>saveBuffer(path,b).catch(e=>message(e.message,true)),900);changed();});
+    model.onDidChangeContent(()=>{if(selection?.path===path)clearSelection();if(suppress)return;b.dirty=model.getValue()!==b.saved;remember(path,b);language?.change(model);if(current===path&&path.endsWith('.md'))scheduleMarkdown();clearTimeout(b.timer);b.timer=setTimeout(()=>saveBuffer(path,b).catch(e=>message(e.message,true)),900);changed();});
     try{const cached=JSON.parse(localStorage.getItem(recoveryKey(path))||'null');
       if(cached && cached.content!==file.content){b.sha=cached.sha;b.model.setValue(cached.content);message('已恢复这台浏览器尚未同步的草稿，正在校验服务器版本。');}
     }catch{message('本机草稿缓存无法读取；服务器文件未改变。',true);}
     language?.open(model);
   }
   if(sequence!==openSequence)return;
+  if (current !== path) clearSelection();
   current=path;editor.updateOptions({readOnly:false});editor.setModel(buffer.model);el('file-name').textContent=path;
   workspaceCache.select(path);
   document.querySelectorAll<HTMLButtonElement>('#tree button').forEach(button=>button.classList.toggle('selected',button.dataset.path===path));
@@ -110,13 +112,34 @@ el('markdown-preview').addEventListener('click',event=>{
   if(href.startsWith('#')){event.preventDefault();el('markdown-preview').querySelector('#'+CSS.escape(decodeURIComponent(href.slice(1))))?.scrollIntoView({block:'start'});return;}
   const path=projectLink(current,href);if(path){event.preventDefault();openFile(path).catch(e=>message(e.message,true));}
 });
-function captureSelection(currentLine=false){
-  if(!current||!editor.getModel())throw new Error('请先打开代码并选择要解释的行');
-  const range=editor.getSelection()!,line=editor.getPosition()!.lineNumber;
-  const start=currentLine?line:range.startLineNumber;
-  const end=currentLine?line:Math.max(start,range.endLineNumber-(range.endColumn===1&&range.endLineNumber>start?1:0));
+function selectCurrentLine() {
+  const model = editor.getModel();
+  const position = editor.getPosition();
+  if (!current || !model || !position) throw new Error('请先打开一个项目文件');
+  const start = position.lineNumber;
+  const tabSize = model.getOptions().tabSize;
+  function indentation(text: string) {
+    let width = 0;
+    for (const char of text) {
+      if (char === ' ') width++;
+      else if (char === '\t') width += tabSize - width % tabSize;
+      else break;
+    }
+    return width;
+  }
+  const firstLine = model.getLineContent(start);
+  const baseIndent = indentation(firstLine);
+  let end = start;
+  if (firstLine.trim()) {
+    for (let row = start + 1; row <= model.getLineCount(); row++) {
+      const text = model.getLineContent(row);
+      if (!text.trim()) continue;
+      if (indentation(text) <= baseIndent) break;
+      end = row;
+    }
+  }
   selection={path:current,start_line:start,end_line:end};
-  editor.setSelection(new monaco.Range(start,1,end,editor.getModel()!.getLineMaxColumn(end)));
+  editor.setSelection(new monaco.Range(start, 1, start, model.getLineMaxColumn(start)));
   annotation={path:current,line:start};
   el('selection-context').hidden=false;el('selection-label').textContent=current+' · 第 '+start+(end===start?'':'–'+end)+' 行';
   el('annotation').hidden=false;el('annotation').textContent='批注 '+current+':'+start;el('clear-annotation').hidden=false;
@@ -212,16 +235,19 @@ function renderChat(rows:any[]){
   el('chat-list').replaceChildren(...items);
   requestAnimationFrame(()=>{const lastQuestion=items.at(-2);if(lastQuestion)el('chat-list').scrollTop=lastQuestion.offsetTop-el('chat-list').offsetTop;});
 }
-async function askQuestion(question:string){
+async function askQuestion(question:string, scope: QuestionScope | null = selection){
   if(generating)throw new Error('上一条回答正在生成');
   await saveAll();generating=true;tab('chat');
   const questionItem=article('你',question),answerItem=article('项目助手','正在准备回答…');
-  if(selection)questionItem.append(article('选中代码',selection.path+' · 第 '+selection.start_line+'–'+selection.end_line+' 行'));
+  if (scope) {
+    const label = 'start_line' in scope ? `第 ${scope.start_line}–${scope.end_line} 行` : '整个文件';
+    questionItem.append(article('解释范围', scope.path + ' · ' + label));
+  }
   const content=answerItem.querySelector<HTMLElement>('.content')!;content.classList.add('markdown');
   el('chat-list').append(questionItem,answerItem);questionItem.scrollIntoView({block:'nearest'});
   let answer='',status='',paint=0;
   try{
-    const response=await fetch(base+'api/chat/stream',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({question,selection})});
+    const response=await fetch(base+'api/chat/stream',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({question,selection:scope})});
     if(!response.ok){const error=await response.json();throw new Error(error.error||'问答请求未完成');}
     const reader=response.body!.getReader(),decoder=new TextDecoder();let pending='';
     const consume=(line:string)=>{
@@ -330,12 +356,19 @@ click('close-dialog',async()=>el<HTMLDialogElement>('version-dialog').close());
 async function reconnectLanguage(){language?.dispose();await new Promise(resolve=>setTimeout(resolve,600));language=new JavaLanguage(wsUrl('lsp'),text=>el('lsp-reconnect').textContent=text);}
 click('lsp-reconnect',reconnectLanguage);
 click('new-file',async()=>{const path=prompt('项目内文件路径，例如 src/model/game/Example.java');if(!path)return;await api('file','PUT',{path,content:'',expected_sha:null});await refreshWorkspace();await openFile(path);});
-click('annotate',async()=>captureSelection(true));
+click('annotate',async()=>selectCurrentLine());
 click('selection-comment',async()=>{tab('discussion');el('comment').focus();});
 click('selection-question',async()=>{tab('chat');el('question').focus();});
 click('selection-clear',async()=>clearSelection());
 click('clear-annotation',async()=>clearSelection());
-click('explain-selection',async()=>{captureSelection();await askQuestion('请解释我选中的这段程序：先说明作用，再按语句或逻辑段解释，最后说明输入输出、调用关系和关键注意点。');});
+click('explain-selection', async () => {
+  if (!current) throw new Error('请先打开一个项目文件');
+  if (selection?.path === current) {
+    await askQuestion('请解释选中的这一行及其下方的缩进块，说明它们的作用、执行顺序和调用关系。', selection);
+  } else {
+    await askQuestion('请解释当前打开的整个文件，说明整体职责、主要结构、关键方法和它与其他文件的调用关系。', {path: current});
+  }
+});
 el<HTMLFormElement>('comment-form').addEventListener('submit',event=>{event.preventDefault();const button=el<HTMLFormElement>('comment-form').querySelector<HTMLButtonElement>('button[type=submit]')!;perform(button,async()=>{
   await saveAll();const mention=el<HTMLSelectElement>('mention').value;await api('comments','POST',{body:el<HTMLTextAreaElement>('comment').value,path:annotation?.path||'',line:annotation?.line||0,mentions:mention?[mention]:[]});
   el<HTMLTextAreaElement>('comment').value='';lastDiscussion='';await poll();
@@ -357,7 +390,7 @@ async function boot(){
   monaco.editor.registerEditorOpener({openCodeEditor:async(_source,resource,selection)=>{
     if(resource.path.startsWith('/workspace/'))await openFile(resource.path.slice('/workspace/'.length));
     else if(resource.scheme==='jdt'){
-      const content=await language.request('java/classFileContents',{uri:resource.toString()});let model=monaco.editor.getModel(resource);if(!model)model=monaco.editor.createModel(content||'没有可用的源代码','java',resource);editor.setModel(model);editor.updateOptions({readOnly:true});current='';el('file-name').textContent='JDK 参考源码';
+      const content=await language.request('java/classFileContents',{uri:resource.toString()});let model=monaco.editor.getModel(resource);if(!model)model=monaco.editor.createModel(content||'没有可用的源代码','java',resource);clearSelection();editor.setModel(model);editor.updateOptions({readOnly:true});current='';el('file-name').textContent='JDK 参考源码';
     }else return false;
     if(selection){if('startLineNumber'in selection){editor.setSelection(selection);editor.revealRangeInCenter(selection);}else{editor.setPosition(selection);editor.revealPositionInCenter(selection);}}return true;
   }});

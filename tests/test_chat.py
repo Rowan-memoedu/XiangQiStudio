@@ -11,8 +11,20 @@ def test_selection_is_resolved_from_the_saved_project():
     files = {"src/Main.java": b"first\nsecond\nthird\n"}
     context = selected_source(files, SimpleNamespace(path="src/Main.java", start_line=2, end_line=3))
     assert "2: second\n3: third" in context and "1: first" not in context
+    assert "4: " in selected_source(files, SimpleNamespace(path="src/Main.java", start_line=4, end_line=4))
     with pytest.raises(Problem):
-        selected_source(files, SimpleNamespace(path="src/Main.java", start_line=1, end_line=4))
+        selected_source(files, SimpleNamespace(path="src/Main.java", start_line=1, end_line=5))
+
+
+def test_file_scope_requires_an_existing_text_file_and_no_line_range():
+    path = "src/Main.java"
+    files = {path: b"class Main {}", "binary.dat": b"\xff"}
+    scope = SimpleNamespace(path=path, start_line=None, end_line=None)
+    assert selected_source(files, scope).startswith("当前解释文件：" + path)
+    with pytest.raises(Problem):
+        selected_source(files, SimpleNamespace(path=path, start_line=1, end_line=None))
+    with pytest.raises(Problem):
+        selected_source(files, SimpleNamespace(path="binary.dat", start_line=None, end_line=None))
 
 
 def test_long_response_is_streamed_and_continued_in_full():
